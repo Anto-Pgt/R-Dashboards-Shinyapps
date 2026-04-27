@@ -1,6 +1,6 @@
 ---
 title: "Dashboard PerfViz Topique-VO"
-author: "ASPC - AP"
+author: "Antonin PUGET"
 output:
   flexdashboard::flex_dashboard:
     orientation: column
