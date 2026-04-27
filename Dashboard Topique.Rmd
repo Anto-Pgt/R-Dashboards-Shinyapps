@@ -1,0 +1,1055 @@
+---
+title: "Dashboard PerfViz Topique-VO"
+author: "ASPC - AP"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: column
+    vertical_layout: fill
+    horizontal_layout: fill
+    source_code: embed
+    theme: united
+    css: styles.css
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+options(repos = list(CRAN="http://cran.rstudio.com/"))
+
+packages <- c("ggExtra", "ggplot2", "plotly", "htmltools", "hrbrthemes", "ggrepel", "forcats", "SensoMineR", "plyr", "data.table", "tibble", "tidyverse", "flexdashboard", "dplyr")
+new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+lapply(packages, library, character.only = TRUE)
+```
+
+# Données
+
+## Sidebar {.sidebar data-width="300"}
+
+### Choix du fichier
+
+```{r}
+fileInput("global", 
+          "Choix du fichier .CSV à importer :",
+          accept =".csv")
+```
+
+### Choix du panel
+
+```{r}
+selectInput("panel", 
+            "Catégorie de panélistes :", 
+            choices = c("Panélistes_Experts", "Nouveaux_Juges"))
+```
+
+### Choix des données comparatives
+
+```{r}
+react<-reactive({input$panel})
+conditionalPanel(condition = "input.panel == 'Nouveaux_Juges'",
+                 fileInput("panel_expert", 
+                           "Fichier .CSV contenant les notes du panel expert sur les mêmes produits :",
+                           accept = ".csv"
+                           )
+                 )
+```
+
+```{r}
+react<-reactive({input$panel})
+conditionalPanel(condition = "input.panel == 'Panélistes_Experts'",
+                 fileInput("old_panel_expert", 
+                           "Fichier .CSV contenant les anciennes notes du panel expert sur les mêmes produits :",
+                           accept = ".csv"
+                           )
+                 )
+```
+
+## Ligne1
+
+### Table de données
+
+```{r}
+react<-reactive({input$global})
+DT::renderDataTable({inFile <- input$global
+  if (is.null(inFile)) {
+    return(NULL)
+  }
+  read.csv2(inFile$datapath)
+}, options = list(pageLength = -1,
+                  lengthMenu = list(c(-1, 5, 10, 15), 
+                                    c('Tout','5','10','15'))
+                  )
+)
+```
+
+### Dimensions du jeu de données {data-height="50"}
+
+```{r}
+react<-reactive({input$global})
+renderPrint({inFile <- input$global
+  if (is.null(inFile)) {
+    return(NULL)
+  }
+  nb_rows<-nrow(read.csv2(inFile$datapath))
+  print(c("Nombre de lignes dans le df :",nb_rows))
+  nb_col<-ncol(read.csv2(inFile$datapath))
+  print(c("Nombre de colonnes dans le df :",nb_col))
+})
+```
+
+# Calculs
+
+## Répét/repro {.tabset .tabset-fade}
+
+Répétabilité - Reproductibilité
+
+```{r Prepa_df_global}
+global <- reactive({
+    req(input$global) 
+    df <- read.csv2(input$global$datapath)
+    df <- as.data.frame(df)
+    df[, 9:ncol(df)] <- lapply(df[, 9:ncol(df)], as.numeric)
+    df<-df[,-c(1,2,7,8)] #Suppression des colonnes non utiles
+    df$CJ <- substr(df$CJ, 1, 6) #On simplifie le nom des juges en ne gardant que les 6 premiers caractères
+    colnames(df)[1] <- "Seance"
+    colnames(df)[2] <- "Juge"
+    colnames(df)[3] <- "Produit"
+    colnames(df)[4] <- "Repetition" 
+    return(df)
+  })
+```
+
+```{r Ecart_moy_reproductibilite}
+df1_repro <- reactive({
+    req(global)
+    df1_repr<-subset(global(), Seance == "1")
+    return(df1_repr)
+  })
+df2_repro <- reactive({
+    req(global)
+    df2_repr<-subset(global(), Seance == "2")
+    return(df2_repr)
+  })
+
+repro_df <- reactive({
+  req(df1_repro)      
+  req(df2_repro)
+  repro_df<-as.data.frame(abs(df1_repro()[,-c(1:4)]-df2_repro()[,-c(1:4)]))
+  colonnes_df1<-df1_repro()[, 2:3] #On récupère le nom des juges et des produits à partir d'un des df
+  repro_df<-cbind(colonnes_df1, repro_df) #On associe ces infos au df contenant les infos des différences absolues
+  repro_df<-repro_df[,-2]
+  return(repro_df)
+})
+
+repro_moy_juge <- reactive({
+    req(df1_repro)      
+    req(df2_repro)
+    req(repro_df)
+    repro_moy<-repro_df() %>%
+      group_by(Juge) %>%
+      summarise_all(mean, na.rm = TRUE) #On moyenne pour chaque descripteur et chaque juge les différences absolues calculées
+    repro_moy$moyenne <- rowMeans(repro_moy[, -1], na.rm = TRUE) #On moyenne les valeurs pour chaque juge sur l'ensemble des descripteurs, pour avoir une seule valeur/juge
+    repro_moy_juge <- as.data.frame(repro_moy$moyenne)
+    rownames(repro_moy_juge)<-repro_moy$Juge #Ajout du nom des lignes
+    colnames(repro_moy_juge)<- "Moy_repro" #Ajout du nom de la colonne
+    
+    return(repro_moy_juge)
+  })
+```
+
+```{r Ecart_moyen_reproductibilite, eval=FALSE, include=FALSE}
+df1_repro <- reactive({
+    req(input$global)  # s'assurer qu'un fichier a été téléchargé
+    df <- read.csv2(input$global$datapath)
+    df[, 9:ncol(df)] <- lapply(df[, 9:ncol(df)], as.numeric)
+    df<-df[,-c(1,2,7,8)] #Suppression des colonnes non utiles
+    df$CJ <- substr(df$CJ, 1, 6) #On simplifie le nom des juges en ne gardant que les 6 premiers caractères
+    colnames(df)[1] <- "Seance"
+    colnames(df)[2] <- "Juge"
+    colnames(df)[3] <- "Produit"
+    colnames(df)[4] <- "Repetition" 
+    #df<-rename(df, "Seance" = NR, "Juge"=CJ, "Produit"=ProductName,"Repetition"=PresPosition) #Rename des colonnes d'intérêt
+    df1_repr<-subset(df, Seance == "1")
+    return(df1_repr)
+  })
+
+df2_repro <- reactive({
+    req(input$global)
+    df <- read.csv2(input$global$datapath)
+    df[, 9:ncol(df)] <- lapply(df[, 9:ncol(df)], as.numeric)
+    df<-df[,-c(1,2,7,8)]
+    df$CJ <- substr(df$CJ, 1, 6)
+    colnames(df)[1] <- "Seance"
+    colnames(df)[2] <- "Juge"
+    colnames(df)[3] <- "Produit"
+    colnames(df)[4] <- "Repetition" 
+    df2_repr<-subset(df, Seance == "2")
+    return(df2_repr)
+  })
+```
+
+```{r Ecart_moyen_reproductibilite_2, eval=FALSE, include=FALSE}
+repro_moy_juge <- reactive({
+    req(df1_repro)      
+    req(df2_repro)
+    repro_df<-as.data.frame(abs(df1_repro()[,-c(1:4)]-df2_repro()[,-c(1:4)]))
+    
+    colonnes_df1<-df1_repro()[, 2:3] #On récupère le nom des juges et des produits à partir d'un des df
+    repro_df<-cbind(colonnes_df1, repro_df) #On associe ces infos au df contenant les infos des différences absolues
+    repro_df<-repro_df[,-2]
+    repro_moy<-repro_df %>%
+      group_by(Juge) %>%
+      summarise_all(mean, na.rm = TRUE) #On moyenne pour chaque descripteur et chaque juge les différences absolues calculées
+    repro_moy$moyenne <- rowMeans(repro_moy[, -1], na.rm = TRUE) #On moyenne les valeurs pour chaque juge sur l'ensemble des descripteurs, pour avoir une seule valeur/juge
+    repro_moy_juge <- as.data.frame(repro_moy$moyenne)
+    rownames(repro_moy_juge)<-repro_moy$Juge #Ajout du nom des lignes
+    colnames(repro_moy_juge)<- "Moy_repro" #Ajout du nom de la colonne
+    
+    return(repro_moy_juge)
+  })
+
+```
+
+```{r Ecart_moy_repetabilite}
+
+repet <- reactive({
+  req(global)
+  global_repro<-subset(global(), Repetition %in% c(3, 4))
+  df1_repet1<-subset(global_repro, Seance == "1" & Repetition == "3")
+  df1_repet2<-subset(global_repro, Seance == "1" & Repetition == "4")
+  df2_repet1<-subset(global_repro, Seance == "2" & Repetition == "3")
+  df2_repet2<-subset(global_repro, Seance == "2" & Repetition == "4")
+#Création de df en fonction des valeurs de "Seance" et de "Repetition"
+
+  repet_df1<-as.data.frame(abs(df1_repet1[,-c(1:4)]-df1_repet2[,-c(1:4)]))
+  repet_df2<-as.data.frame(abs(df2_repet1[,-c(1:4)]-df2_repet2[,-c(1:4)]))
+#Calcul des différence absolues entre les répétitions du produit C, pour la séance 1 et pour la séance 2 de manière séparée
+
+  colonnes<-df1_repet1[, 2:3] #Extraction puis ajout au nouveaux df du nom des juges et des produits.
+  repet_df1<-cbind(colonnes, repet_df1)
+  repet_df2<-cbind(colonnes, repet_df2)
+
+  repet<- rbind(repet_df1, repet_df2) #Intégration des 2 df (celui de la séance 1 et celui de la séance2) dans un même df
+  return(repet)
+})
+
+
+repet_moy_juge <- reactive({
+  req(repet)
+  repet_moy <- repet()[,-2] %>%
+    group_by(Juge) %>%
+    summarise_all(mean, na.rm = TRUE) #On moyenne pour chaque descripteur et chaque juge les différences absolues de répétition des 2 séances
+  repet_moy$moyenne <- rowMeans(repet_moy[, -1], na.rm = TRUE) #On moyenne les valeurs pour chaque juge sur l'ensemble des descripteurs, pour avoir une seule valeur/juge
+  repet_moy_juge <- as.data.frame(repet_moy$moyenne)
+  rownames(repet_moy_juge)<-repet_moy$Juge #Ajout du nom des lignes
+  colnames(repet_moy_juge)<- "Moy_repet" #Ajout du nom de la colonne
+   
+  return(repet_moy_juge)
+})
+```
+
+```{r nb_ecarts_repro}
+def_repro <- reactive({
+  req(repro_df)
+  repro_df2<-repro_df()
+  Def_repro_moy<- repro_df2 %>%
+    group_by(Juge) %>%
+    summarise_all(mean, na.rm = TRUE) #Moyenne des écarts de repro sur les 4 produits, par juge/descripteur
+  Def_repro_moy$nb_défauts<-apply(Def_repro_moy[, -1], 1, function(x) sum(x > 25)) #Décompte pour chaque ligne du nombre de valeurs>25 et ajout de ces valeurs dans une nouvelles colonnes nommée "nb_défauts"
+  def_repro<-Def_repro_moy[,c(1,ncol(Def_repro_moy))] #On ne garde que le nom des juges et le décompte des défauts de repro dans un nouveau df
+  #rownames(def_repro)<-Def_repro_moy$Juge #Rename du df avec le nom des juges
+  #def_repro<-def_repro[,-1] #Suppression de la colonne noms des juges devenue inutile
+  def_repro<-column_to_rownames(def_repro, var = "Juge")
+  colnames(def_repro)<- "nb_defauts_repro"
+
+  return(def_repro)
+})
+```
+
+```{r nb_ecart_repet}
+def_repet <- reactive({
+  req(repet)
+  repet2<-repet()[,-2]
+  Def_repet_moy<- repet2 %>%
+    group_by(Juge) %>%
+    summarise_all(mean, na.rm = TRUE) #Moyenne des écarts de répét sur le produit C, par juge/descripteur
+  Def_repet_moy$nb_défauts<-apply(Def_repet_moy[, -1], 1, function(x) sum(x > 25)) #Décompte pour chaque ligne du nombre de valeurs>25 et ajout de ces valeurs dans une nouvelles colonnes nommée "nb_défauts"
+  def_repet<-Def_repet_moy[,c(1,ncol(Def_repet_moy))] #On ne garde que le nom des juges et le décompte des défauts de repro dans un nouveau df
+  #rownames(def_repet)<-Def_repet_moy$Juge
+  #def_repet<-def_repet[,-1] #Suppression de la colonne noms des juges devenue inutile
+  def_repet<-column_to_rownames(def_repet, var = "Juge")
+  colnames(def_repet)<- "nb_defauts_repet"
+
+  return(def_repet)
+})
+```
+
+```{r Df_RR}
+df_rr<- reactive({
+  req(def_repet)
+  req(def_repro)
+  req(repet_moy_juge)
+  req(repro_moy_juge)
+  #def_repro<-column_to_rownames(def_repro(), var = "Juge")
+  #def_repet<-column_to_rownames(def_repet(), var = "Juge")
+  repet_moy_juge<-as.data.frame(repet_moy_juge())
+  repro_moy_juge<-as.data.frame(repro_moy_juge())
+  def_repet<-as.data.frame(def_repet())
+  def_repro<-as.data.frame(def_repro())
+  
+  rrplot<-cbind(repet_moy_juge, def_repet, repro_moy_juge, def_repro)
+  rrplot$Repetabilite<-rrplot$Moy_repet*(rrplot$nb_defauts_repet+1)
+  rrplot$Reproductibilite<-rrplot$Moy_repro*(rrplot$nb_defauts_repro+1)
+  return(rrplot)
+})
+```
+
+### df1_repro
+
+```{r}
+DT::renderDataTable(df1_repro(), 
+                    options = list(pageLength = -1,
+                                   lengthMenu = list(c(-1, 5, 10, 15),
+                                                     c('Tout','5','10','15'))
+                                   )
+                    )
+```
+
+### df2_repro
+
+```{r}
+DT::renderDataTable(df2_repro(), 
+                    options = list(pageLength = -1,
+                                   lengthMenu = list(c(-1, 5, 10, 15),
+                                                     c('Tout','5','10','15'))
+                                   )
+                    )
+```
+
+### df_repro
+
+```{r}
+DT::renderDataTable(repro_moy_juge(), 
+                    options = list(pageLength = -1,
+                                   lengthMenu = list(c(-1, 5, 10, 15),
+                                                     c('Tout','5','10','15'))
+                                   )
+                    )
+```
+
+### df_repet
+
+```{r}
+DT::renderDataTable(repet_moy_juge(), 
+                    options = list(pageLength = -1,
+                                   lengthMenu = list(c(-1, 5, 10, 15),
+                                                     c('Tout','5','10','15'))
+                                   )
+                    )
+```
+
+### Défauts repro
+
+```{r}
+DT::renderDataTable(def_repro(), 
+                    options = list(pageLength = -1,
+                                   lengthMenu = list(c(-1, 5, 10, 15),
+                                                     c('Tout','5','10','15'))
+                                   )
+                    )
+```
+
+### Défauts répét
+
+```{r}
+DT::renderDataTable(def_repet(), 
+                    options = list(pageLength = -1,
+                                   lengthMenu = list(c(-1, 5, 10, 15),
+                                                     c('Tout','5','10','15'))
+                                   )
+                    )
+```
+
+### df_rr
+
+```{r}
+DT::renderDataTable(df_rr(), 
+                    options = list(pageLength = -1,
+                                   lengthMenu = list(c(-1, 5, 10, 15),
+                                                     c('Tout','5','10','15'))
+                                   )
+                    )
+```
+
+## Discrimination {.tabset .tabset-fade}
+
+Qualité de discrimination
+
+```{r Tables_pouvoir_discri}
+global_discri <- reactive({
+  req(global)
+  global<-as.data.frame(global())
+  global_discri <- global  %>%
+    mutate(Produit = ifelse(Repetition == "4",
+                            substr(Produit, 1, nchar(Produit) - 2), Produit))
+  #On indique le nb de répétition en l'adaptant au produit C
+  global_discri<-global_discri %>%
+    mutate(Repetition = ifelse(Seance=="1" & Repetition=="3", 1, Repetition))
+  global_discri<-global_discri %>%
+    mutate(Repetition = ifelse(Seance=="1" & Repetition=="4", 2, Repetition))
+  global_discri<-global_discri %>%
+    mutate(Repetition = ifelse(Seance=="2" & Repetition=="3", 3, Repetition))
+  global_discri<-global_discri %>%
+    mutate(Repetition = ifelse(Seance=="2" & Repetition=="4", 4, Repetition))
+      
+  #Pour les produits A et B, on garde le numéro de séance comme numéro de répétition
+  global_discri$Rep_discri<-global$Repetition
+  global_discri<-global_discri %>%
+     mutate(Repetition = ifelse(Rep_discri == "1" | Rep_discri == "2",
+                                Seance, Repetition))
+  global_discri <- global_discri [,-ncol(global_discri)]
+  return(global_discri)
+})
+
+result_primaire <- reactive({
+  req(global_discri)
+  global_discri<-as.data.frame(global_discri())
+  #Calcul de l'effet produit individuel et global :
+  formule="~Produit+Juge+Repetition+Produit:Juge+Produit:Repetition+Juge:Repetition"
+  respaneli<-paneliperf(global_discri, formul=formule, formul.j="~Produit", 
+                        col.j=2, firstvar=5, synthesis=TRUE, random=FALSE)
+  res<-as.data.frame(respaneli$vtest.ind)
+  res[is.na((res))]<-0
+  pvalglob<-t(as.data.frame(respaneli$complete[,1]))
+  discri<-as.data.frame(rbind(res,pvalglob))
+      
+  return(discri)
+    })
+
+global_discri_old <- reactive({
+    if(input$panel == "Nouveaux_Juges") {
+    req(input$panel_expert) 
+    global <- read.csv2(input$panel_expert$datapath)
+    global <- as.data.frame(global)
+    global[, 9:ncol(global)] <- lapply(global[, 9:ncol(global)], as.numeric)
+    global<-global[,-c(1,2,7,8)]
+    global$CJ <- substr(global$CJ, 1, 6)
+    colnames(global)[1] <- "Seance"
+    colnames(global)[2] <- "Juge"
+    colnames(global)[3] <- "Produit"
+    colnames(global)[4] <- "Repetition" 
+    
+    global<-as.data.frame(global)
+    global_discri <- global  %>%
+      mutate(Produit = ifelse(Repetition == "4", 
+                              substr(Produit, 1, nchar(Produit) - 2), Produit))
+    global_discri<-global_discri %>%
+      mutate(Repetition = ifelse(Seance=="1" & Repetition=="3", 1, Repetition))
+    global_discri<-global_discri %>%
+      mutate(Repetition = ifelse(Seance=="1" & Repetition=="4", 2, Repetition))
+    global_discri<-global_discri %>%
+      mutate(Repetition = ifelse(Seance=="2" & Repetition=="3", 3, Repetition))
+    global_discri<-global_discri %>%
+      mutate(Repetition = ifelse(Seance=="2" & Repetition=="4", 4, Repetition))
+      
+    global_discri$Rep_discri<-global$Repetition
+    global_discri<-global_discri %>%
+      mutate(Repetition = ifelse(Rep_discri == "1" | Rep_discri == "2",
+                                 Seance, Repetition))
+    global_discri <- global_discri [,-ncol(global_discri)]
+    }
+})
+
+result_secondaire <- reactive({
+  if(input$panel == "Nouveaux_Juges") {
+    req(global_discri_old)
+    global_discri<-as.data.frame(global_discri_old())
+    formule="~Produit+Juge+Repetition+Produit:Juge+Produit:Repetition+Juge:Repetition"
+    respaneli<-paneliperf(global_discri, formul=formule, formul.j="~Produit", 
+                          col.j=2, firstvar=5, synthesis=TRUE, random=FALSE)
+    res<-as.data.frame(respaneli$vtest.ind)
+    res[is.na((res))]<-0
+    pvalglob<-t(as.data.frame(respaneli$complete[,1]))
+    discri<-as.data.frame(rbind(res,pvalglob))
+      
+    return(discri)
+    }
+  })
+```
+
+```{r Coeff_corr_discri}
+coeff_cor_expert <- reactive({
+    if(input$panel == "Panélistes_Experts") {
+      req(result_primaire)
+      result_primaire<- as.data.frame(result_primaire())
+      # La dernière ligne correspond aux Fstat du panel global
+      ligne_reference<-as.numeric(result_primaire[nrow(result_primaire),])
+      # Initialiser un vecteur pour stocker les résultats de corrélation
+      resultats_correlation<-numeric(nrow(result_primaire))
+      for(i in 1:nrow(result_primaire)-1){# Boucler sur chaque ligne du dataframe
+        # Convertir la ligne actuelle en un vecteur numérique
+        ligne_actuelle <- as.numeric(result_primaire[i, ])
+        # Calculer la corrélation avec la ligne de référence
+        resultats_correlation[i] <- cor(ligne_reference, ligne_actuelle)
+        }
+      # Création d'un df avec les valeurs de corrélation et le nom des juges
+      resultats_correlation<-as.data.frame(resultats_correlation[1:nrow(result_primaire)-1])
+      rownames(resultats_correlation)<-as.list(rownames(result_primaire)[1:nrow(result_primaire)-1])
+      colnames(resultats_correlation)<-"Valeur"
+      
+      return(resultats_correlation)
+    }
+})
+
+coeff_cor_new <- reactive({
+    if(input$panel == "Nouveaux_Juges") {
+      req(result_primaire)
+      req(result_secondaire)
+      result_primaire<- as.data.frame(result_primaire())
+      result_secondaire<- as.data.frame(result_secondaire())
+
+      # La dernière ligne correspond aux Fstat du panel global
+      ligne_reference<-as.numeric(result_secondaire[nrow(result_secondaire),])
+      # Initialiser un vecteur pour stocker les résultats de corrélation
+      resultats_correlation<-numeric(nrow(result_primaire))
+      for(i in 1:nrow(result_primaire)-1){# Boucler sur chaque ligne du dataframe
+        # Convertir la ligne actuelle en un vecteur numérique
+        ligne_actuelle <- as.numeric(result_primaire[i, ])
+        # Calculer la corrélation avec la ligne de référence
+        resultats_correlation[i] <- cor(ligne_reference, ligne_actuelle)
+        }
+      # Création d'un df avec les valeurs de corrélation et le nom des juges
+      resultats_correlation<-as.data.frame(resultats_correlation[1:nrow(result_primaire)-1])
+      rownames(resultats_correlation)<-as.list(rownames(result_primaire)[1:nrow(result_primaire)-1])
+      colnames(resultats_correlation)<-"Valeur"
+      
+      return(resultats_correlation)
+    }
+})
+```
+
+### Table discri primaire
+
+```{r}
+DT::renderDataTable(result_primaire(), 
+                    options = list(pageLength = -1,
+                                   lengthMenu = list(c(-1, 5, 10, 15),
+                                                     c('Tout','5','10','15'))
+                                   )
+                    )
+```
+
+### Table discri secondaire
+
+```{r}
+DT::renderDataTable(result_secondaire(), 
+                    options = list(pageLength = -1,
+                                   lengthMenu = list(c(-1, 5, 10, 15),
+                                                     c('Tout','5','10','15'))
+                                   )
+                    )
+```
+
+### Coeff discri experts
+
+```{r}
+DT::renderDataTable(coeff_cor_expert(), 
+                    options = list(pageLength = -1,
+                                   lengthMenu = list(c(-1, 5, 10, 15),
+                                                     c('Tout','5','10','15'))
+                                   )
+                    )
+```
+
+### Coeff discri new
+
+```{r}
+DT::renderDataTable(coeff_cor_new(), 
+                    options = list(pageLength = -1,
+                                   lengthMenu = list(c(-1, 5, 10, 15),
+                                                     c('Tout','5','10','15'))
+                                   )
+                    )
+```
+
+## Accord {.tabset .tabset-fade}
+
+Accord avec le panel expert
+
+```{r Ecart_moyen}
+ global_mod2 <- reactive({
+   if(input$panel == "Panélistes_Experts") {
+     req(global_discri)
+     global_discri<-as.data.frame(global_discri())
+     global_accord <- global_discri[,-1]
+     firstvar = 4
+     #Mise en forme du fichier de données initiale
+     global_mod <- global_accord %>%
+       pivot_longer(!c(Juge,Produit,Repetition),
+                    names_to = "descripteur",
+                    values_to = "Notes")
+     #Mise en forme en classant les valeurs avec chaque juge en colonne
+     global_mod2 <- global_mod %>%
+       pivot_wider(names_from = "Juge",
+                   values_from = "Notes")
+     #Calcul et ajout de la note moyenne du panel
+     moyennes <- rowMeans(global_mod2[, 4:ncol(global_mod2)], na.rm = TRUE)
+     global_mod2$Panel <- moyennes
+     
+     return(global_mod2)
+   }
+   
+   if(input$panel == "Nouveaux_Juges") {
+     req(global_discri)
+     req(global_discri_old)
+     global_discri<-as.data.frame(global_discri())
+     global_discri_old<-as.data.frame(global_discri_old())
+
+     global_accord <- global_discri[,-1]
+     firstvar = 4
+     global_mod <- global_accord %>%
+       pivot_longer(!c(Juge,Produit,Repetition),
+                    names_to = "descripteur",
+                    values_to = "Notes")
+     global_mod2<-global_mod %>%
+       pivot_wider(names_from = "Juge",
+                   values_from = "Notes")
+     
+     global_accord_old <- global_discri_old[,-1]
+     global_mod_old <- global_accord_old %>%
+       pivot_longer(!c(Juge,Produit,Repetition),
+                    names_to = "descripteur",
+                    values_to = "Notes")
+     global_mod_old_2<-global_mod_old %>%
+       pivot_wider(names_from = "Juge",
+                   values_from = "Notes")
+     
+     #Calcul et ajout de la note moyenne du panel expert
+     moyennes <- rowMeans(global_mod_old_2[, 4:ncol(global_mod_old_2)], 
+                          na.rm = TRUE)
+     global_mod2$Panel <- moyennes
+     return(global_mod2)
+   }
+ })
+     
+ delta <- reactive({
+     req(global_mod2)
+     global_mod2<-as.data.frame(global_mod2())
+     numcolmoy<-ncol(global_mod2)
+     #Calcul et ajout des écarts absolus
+     nblignes<-nrow(global_mod2)
+     nbcol<-ncol(global_mod2)-1
+     
+     for (k in 4:nbcol) {
+       v<-c()
+       for (i in 1:nblignes) {
+         a<-as.numeric(global_mod2[i,k])
+         b<-as.numeric(global_mod2[i,numcolmoy])
+         v[i] <-abs(a-b)
+         }
+       nom_colonne <- paste(colnames(global_mod2 [k]), "écart", sep = "_")
+       global_mod2[[nom_colonne]] <- v
+       }
+     #Calcul de la moyenne des écarts à la moyenne / Juge
+     moyennes_ecarts <- global_mod2[, (numcolmoy+1):(ncol(global_mod2))] %>%
+       dplyr::summarise(dplyr::across(everything(), \(x) mean(x, na.rm = TRUE)))
+     moyennes_ecarts<-t(moyennes_ecarts)
+     delta<-as.data.frame(moyennes_ecarts)
+     colnames(delta)<-"delta"
+     
+     return(delta)
+ })
+```
+
+```{r Correlation}
+correlation <- reactive({
+  req(global_mod2)
+  global_mod2<-as.data.frame(global_mod2())
+  delta<-as.data.frame(delta())
+  numcolmoy<-ncol(global_mod2)
+
+  #Calcul de l'indice de corrélation par juge avec les notes moyennes du panel pour l'ensemble des valeurs 
+  correlation<-c()
+  pval_cor<-c()
+  for (j in 4:(numcolmoy-1)) {
+    x<-as.data.frame(global_mod2[,j]) 
+    y<-as.data.frame(global_mod2[,numcolmoy])
+    cor_res<-cor.test(x[,1],y[,1])
+    correlation[j-3]<-as.numeric(cor_res$estimate)
+    pval_cor[j-3]<-as.numeric(cor_res$p.value)
+    }
+  correlation<-as.data.frame(correlation)
+  pval_cor<-as.data.frame(pval_cor)
+  rownames(correlation)<-colnames(global_mod2[,4:(numcolmoy-1)])
+  rownames(pval_cor)<-colnames(global_mod2[,4:(numcolmoy-1)])
+  #hist(correlation$correlation, breaks = 29)
+  #hist(pval_cor$pval_cor, breaks = 29)
+
+  #Un df unique avec corr et pval_cor
+  resume<-correlation
+  resume$pval_corr<-pval_cor$pval_cor
+  return(resume)
+})
+```
+
+```{r delta_cor}
+#1 seul dataframe avec les valeurs de corrélation et d'écart à la moyenne
+delta_cor <- reactive({
+  req(correlation())
+  req(delta())
+  correlation<-as.data.frame(correlation())
+  delta<-as.data.frame(delta())
+
+  delta_cor <- correlation
+  delta_cor$delta<-delta$delta
+  
+  return(delta_cor)
+})
+```
+
+### Écart à la moyenne panel expert
+
+```{r}
+DT::renderDataTable(delta(), 
+                    options = list(pageLength = -1,
+                                   lengthMenu = list(c(-1, 5, 10, 15),
+                                                     c('Tout','5','10','15'))
+                                   )
+                    )
+```
+
+### Global_mod2
+
+```{r}
+DT::renderDataTable(global_mod2(), 
+                    options = list(pageLength = -1,
+                                   lengthMenu = list(c(-1, 5, 10, 15),
+                                                     c('Tout','5','10','15'))
+                                   )
+                    )
+```
+
+### Corrélation
+
+```{r}
+DT::renderDataTable(correlation(), 
+                    options = list(pageLength = -1,
+                                   lengthMenu = list(c(-1, 5, 10, 15),
+                                                     c('Tout','5','10','15'))
+                                   )
+                    )
+```
+
+# Graphiques
+
+## Colonne1 : Discrimination {data-width="333"}
+
+### Qualité de discrimination
+
+```{r Graph_discri}
+Discri_plot<-reactive({
+  if(input$panel == "Panélistes_Experts") {
+    req(coeff_cor_expert)
+    resultats_correlation<-as.data.frame(coeff_cor_expert())
+    graphdiscri<-setorder(resultats_correlation)
+    graphdiscri<-rownames_to_column(graphdiscri, "Noms")
+    
+    graph_discri<-graphdiscri %>%
+      mutate(Noms = fct_reorder(Noms, Valeur)) %>%
+        ggplot(aes(x=Noms, y=Valeur, fill=Valeur)) +
+        geom_bar(stat="identity", alpha=.8, width=.7) +
+        coord_flip() +
+        xlab("") +
+        geom_hline(aes(yintercept = 0.5), colour = "#a9f868") +
+        ylab("Indice de corrélation")+
+        ylim(-0.5,1)+
+        labs(fill = "Coefficient \nde corrélation")+
+        scale_fill_gradient(low="#B81840", high = "#33608C")+
+        geom_text(aes(label=round(Valeur,3)),
+                  hjust = ifelse(graphdiscri$Valeur< 0, 1.1, -0.3), size=5,
+                  colour = ifelse(graphdiscri$Valeur<0.5,"darkred", "darkgreen"))+
+        ggtitle("Corrélation entre les F-stat de l'effet produit individuel \net global pour l'ensemble des descripteurs")+
+        theme_bw()+
+        theme(title = element_text(size = 12), 
+              axis.text.y = element_text(size = 12),
+              axis.text.x = element_text(size = 12),
+              legend.text = element_text(size = 12))
+    return(graph_discri)
+  }
+  
+  if(input$panel == "Nouveaux_Juges") {
+    req(coeff_cor_new)    
+    resultats_correlation<-as.data.frame(coeff_cor_new())
+    graphdiscri<-setorder(resultats_correlation)
+    graphdiscri<-rownames_to_column(graphdiscri, "Noms")
+    
+    graph_discri<-graphdiscri %>%
+      mutate(Noms = fct_reorder(Noms, Valeur)) %>%
+        ggplot(aes(x=Noms, y=Valeur, fill=Valeur)) +
+        geom_bar(stat="identity", alpha=.8, width=.7) +
+        coord_flip() +
+        xlab("") +
+        geom_hline(aes(yintercept = 0.5), colour = "#a9f868") +
+        ylab("Indice de corrélation")+
+        ylim(-0.5,1)+
+        labs(fill = "Coefficient \nde corrélation")+
+        scale_fill_gradient(low="#B81840", high = "#33608C")+
+        geom_text(aes(label=round(Valeur,3)),
+                  hjust = ifelse(graphdiscri$Valeur< 0, 1.1, -0.3), size=5,
+                  colour = ifelse(graphdiscri$Valeur<0.5,"darkred", "darkgreen"))+
+        ggtitle("Corrélation entre les F-stat de l'effet produit individuel \net global du panel expert pour l'ensemble des descripteurs")+
+        theme_bw()+
+        theme(title = element_text(size = 12),
+              axis.text.y = element_text(size = 12),
+              axis.text.x = element_text(size = 12),
+              legend.text = element_text(size = 12))
+    return(graph_discri)
+  }
+})
+
+renderPlot({Discri_plot()})
+```
+
+## Colonne2 : Répét/Repro + Accord {.tabset .tabset-fade}
+
+### Repro-Répét Html
+
+```{r RR_plot_html}
+rr_plot_html<-reactive({
+  rrplot<-as.data.frame(df_rr())
+  rrplot<-rownames_to_column(rrplot, var = "Juges")
+  graph<-ggplot(rrplot,
+                aes(x = Reproductibilite, y = Repetabilite, group = Juges))+
+    annotate("rect", xmin = 0, ymin = 0, xmax = 100, ymax = 100,
+             alpha = 0.2, color = "#CCFF90", fill = "#CCFF90")+
+    geom_vline(xintercept = median(rrplot$Reproductibilite),
+               color = "orange", linewidth = 0.5)+
+    geom_hline(yintercept = median(rrplot$Repetabilite),
+               color = "orange", linewidth = 0.5)+
+    geom_point(color = "#7E57C2",alpha = 0.7, size = 1,
+               stroke = 1, shape = 19)+
+    labs(title ="Indice de Répétabilité vs Indice de reproductibilité \n Indice = (Nb défauts>25 + 1) x Moyenne des défauts")+
+    theme_ipsum(axis_title_size = 14, plot_title_size = 14)
+  
+  graph<-ggplotly(graph)
+  return(graph)
+})
+
+renderPlotly({rr_plot_html()})
+```
+
+### Accord Html
+
+```{r Accord_plot_html}
+Accord_plot_html<-reactive({
+  resume<-as.data.frame(delta_cor())
+  resume<-rownames_to_column(resume, var = "Juges")
+
+  graph<-ggplot(resume,
+                aes(x=correlation, y=delta, group = Juges))+
+    xlim(c(1,0))+
+    annotate("rect", xmin=0.5, ymin=0, xmax=1, ymax=25,
+             alpha=0.2, color="#CCFF90", fill="#CCFF90")+
+    geom_vline(xintercept = median(resume$correlation),
+               color = "orange", linewidth = 0.5)+
+    geom_hline(yintercept = median(resume$delta),
+               color = "orange", linewidth = 0.5)+
+    geom_point(color = "#7E57C2",alpha = 0.7, size = 1,
+               stroke = 1, shape = 19)+
+    labs(title ="Accord")+
+    theme_ipsum(axis_title_size = 14, plot_title_size = 14)
+  
+  graph<-ggplotly(graph)
+  return(graph)
+})
+renderPlotly({Accord_plot_html()})
+```
+
+### Repro-Répét Png
+
+```{r RR_plot_png}
+rr_plot_png<-reactive({
+  rrplot<-as.data.frame(df_rr())
+  rrplot<-rownames_to_column(rrplot, var = "Juges")
+  graph<-ggMarginal(ggplot(rrplot, aes(x = Reproductibilite, y = Repetabilite,
+                                       color = (Reproductibilite+Repetabilite)))+
+             scale_colour_gradient(high = "red")+
+             annotate("rect", xmin = 0, ymin = 0, xmax = 100, ymax = 100, 
+                      alpha = 0.15, color = "#CCFF90", fill = "#CCFF90")+
+             geom_point(alpha = 0.7, size = 2, stroke = 1, shape = 19)+
+             geom_text_repel(aes(label = Juges), 
+                             hjust = -0.3, size = 4)+
+             theme_ipsum(base_family = "Arial", axis_title_size = 11,
+                         axis_text_size = 10)+
+             labs(color = "Indice Répétabilité \n + \nIndice Reproductibilité")+
+             theme(legend.text = element_text(size = 10), 
+                   legend.title = element_text(size = 10, face = "italic")), 
+             type = "boxplot", size = 25)
+  return(graph)
+})
+
+renderPlot({rr_plot_png()})
+```
+
+### Accord Png
+
+```{r Accord_plot_png}
+Accord_plot_png<-reactive({
+  resume<-as.data.frame(delta_cor())
+  graph<-ggMarginal(ggplot(resume, aes(x=correlation, y=delta, 
+                                       color=(delta/(correlation/1.5))))+
+                      scale_colour_gradient(high = "red")+
+                      annotate("rect", xmin=0.5, ymin=0, xmax=1, ymax=25, 
+                      alpha=0.2, color="#CCFF90", fill="#CCFF90")+
+                      geom_point(alpha=0.7, size=2, stroke=1, shape=19)+
+                      geom_text_repel(aes(label=rownames(resume)), 
+                                      hjust=-0.3, size = 4)+
+                      xlim(c(1,0))+
+                      ylim(c(0,50))+
+                      theme_ipsum(axis_title_size = 10, axis_text_size = 11)+
+                      labs(color="Delta /\n(Corrélation/1,5)")+
+                      theme(legend.text=element_text(size = 10), 
+                            legend.title=element_text(size = 10, face="italic")),
+                    type="boxplot", size=25)
+  return(graph)
+})
+
+renderPlot({Accord_plot_png()})
+```
+
+# Informations sur les calculs {style="position:relative;"}
+
+## Visualisation des performances des panels
+
+### Visualisation des performances des panels
+
+[[**Objectifs et présentation globale**]{.underline}]{.smallcaps}
+
+| L'objectif de ce Dashboard est de fournir un support d'aide à la visualisation des données de performance des panels sensoriels, topiques ou OC, et à la prise de décision concernant les résultats obtenus. Les performances observées ici ne s'appliquent qu'aux séances de mesures spécifiquement designées pour la mesure des performances, et non au suivi de la qualité des données sur les séances de "routine".
+| Ce document peut être utilisé pour la mesure des performances d'un panel expert, mais également celle de nouveaux juges, préalable à leur intégration au sein d'un des panels.
+| Lors des séances de mesure des performances, 3 produits (A, B et C) sont évalués lors de 2 séances, elles mêmes divisées en 2 blocs. Les 2 blocs d'une même séance sont dans l'idéal réalisés dans une même semaine. Les 2 séances sont dans l'idéal réalisées à 1 ou 2 semaines d'intervalle.
+| *S1-Bl1 : A-B*
+| *S1-Bl2 : C-C' (répétition de C)*
+| *S2-Bl2 : A-B (reproductibilité de A et B)*
+| *S2-Bl2 : C-C' (répétition + reproductibilité de C)*
+| 
+| Le fichier de données à partir duquel sont faits les graphiques et analyses, doit être le même que le fichier extrait de fizz, seulement convertit d'un .txt à un .csv.
+| Ce fichier est établi à partir d'une séance fizz construite de la même manière que cette séance : "J:\\Fizz\\FizzData\\COSMETO_FIZZ3\\Pages modèles (sans RI)\\perf.sea".
+
+------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+
+\
+
+[**Répétabilité & Reproductibilité**]{.underline}
+
+\
+
+[**Reproductibilité**]{.smallcaps}
+
+-   *Moyennes des écarts*
+
+| Calcul des écarts absolus entre les notations d'un même produit sur chaque descripteur, pour chaque juge. Ce calcul est effectué sur l'ensemble des produits, étant donné que tous ont été évalués de manière "reproduites", à environ 1-2 semaines d'intervalle.
+| On considère le produit répété comme un "double" produit : la répétition 1 est noté comme un produit, et la répétition 2 est noté comme un second produit. On calcul donc la différence de notation entre les produits A, B, C et C', entre leur première évaluation (semaine 1) et leur seconde évaluation (semaine 2).
+| Ces écarts sont ensuite moyennés par produits et descripteurs, afin d'obtenir une seule valeur d'écart de reproductibilité moyenne par juge.
+
+\
+
+-   *Nombre de défauts*
+
+| A partir du calcul de l'écart absolue de notation, on moyenne ces écarts sur les 4 produits pour chaque juge et chaque descripteurs. On décompte ensuite le nombre de valeurs supérieures à 25 sur l'ensemble des descripteurs évalués pour chaque juge.
+
+------------------------------------------------------------------------
+
+\
+
+[**Répétabilité**]{.smallcaps}
+
+-   *Moyennes des écarts*
+
+| Calcul des des écarts absolus entre les notations du produit C et C' sur chaque descripteur, pour chaque juge et chacune des 2 séances (semaine 1 et semaine 2).
+| Ces écarts sont ensuite moyennés par produits et descripteurs, afin d'obtenir une seule valeur d'écart de répétabilité moyenne par juge.
+
+\
+
+-   *Nombre de défauts*
+
+| A partir du calcul de l'écart absolue de notation des produits C et C', on moyenne ces écarts sur les 2 produits pour chaque juge et chaque descripteurs. On décompte ensuite le nombre de valeurs supérieures à 25 sur l'ensemble des descripteurs évalués pour chaque juge.
+
+------------------------------------------------------------------------
+
+\
+
+[**Visualisation graphique**]{.smallcaps}
+
+| Le tableau de données à partir duquel est construit le graphique est construit à partir de 2 indicateurs : l'indice de reproductibilité et l'indice de répétabilité.
+
+| Ces derniers sont calculés de la manière suivante :
+| **Indice de répétabilité :** *Moyenne des écarts à la moyenne [calculés seulement pour le produit répété, lors des 2 séances] x ((Nombre de défauts de répétabilité\>25) + 1)*
+| **Indice de reproductibilité :** *Moyenne des écarts à la moyenne [calculés sur l'ensemble des produits, entre la "Séance 1" et la "Séance 2"] x ((Nombre de défauts de répétabilité\>25) + 1)*
+
+\
+
+| [*Définition d'un espace de validation de la qualité de répétabilité / reproductibilité des données :*]{.underline}
+| Actuellement l'espace d'acceptabilité des indices de répétabilité et de reproductibilité est fixé à 0-100 pour les 2 indices. Cet intervalle est défini empiriquement et pourra être amené à évoluer.
+
+------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+
+\
+
+[**Discrimination**]{.underline}
+
+\
+
+| Mise en place d'indicateurs permettant de comparer la corrélation entre le pouvoir discriminant de chaque juge pour chacun de descripteurs avec le pouvoir discriminant de l'ensemble du panel expert sur les mêmes descripteurs, pour les mêmes produits. Le panel expert dans sa globalité étant considéré comme étant la "véritable" discrimination, on souhaite que chaque panéliste ait un coefficient de corrélation avec le panel le plus proche de 1.
+
+\
+
+-   *Panel Expert*
+
+| La qualité du pouvoir discriminant est évalué à partir du coefficient de corrélation de Pearson entre les Fstat de l'effet produit individuel et celles de l'effet produit de l'ensemble du panel, pour chaque descripteur, entre les 4 produits A, B, C et C'.
+
+\
+
+-   *Nouveaux Juges*
+
+| La qualité du pouvoir discriminant est évalué à partir du coefficient de corrélation de Pearson entre les Fstat de l'effet produit individuel de chaque nouveau juge, et celles de l'effet produit de l'ensemble du panel expert (ayant déjà effectué une séance de mesure des performance sur les mêmes produits), pour chaque descripteur, entre les 4 produits A, B, C et C'.
+
+\
+
+| [*Seuil de validation de la qualité de discrimination des données :*]{.underline}
+| Actuellement le seuil d'acceptabilité des indices de corrélation du pouvoir discriminant est à 0,5. Les Juges ayant un indice supérieur à cette valeur sont considérés comme correctement discriminant (du moins vis à vis du panel expert). Ce seuil est défini empiriquement et pourra être amené à évoluer.
+
+------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+
+\
+[**Accord**]{.underline}
+
+\
+
+2 indicateurs sont mis en place :
+
+-   *Moyenne des écarts à la moyenne du panel*
+
+| Calcul des écarts absolus pour chacun des panélistes avec la note moyenne du panel (ou du panel expert si mesure des performances de nouveaux candidats juges), sur les couples Produit / Descripteur / Répétition. Les écarts sont ensuite moyennés pour obtenir un seul écart moyen par juge.
+
+\
+
+-   *Indice de corrélation*
+
+| Corrélation de l'ensemble des valeurs individuelles (une valeur par couple Produit / Descripteur / Répétition) avec l'ensemble des valeurs moyennes du panel (ou du panel expert si mesure des performances de nouveaux candidats juges), qui a donc le même nombre de valeurs. On obtient un indice de corrélation entre les 2 séries de valeurs "appareillées" pour chaque juge.
+
+\
+
+| [*Définition d'un espace de validation de l'accord juge/panel :*]{.underline}
+| Actuellement l'espace d'acceptabilité de la qualité d'accord est fixé à 0-25 pour l'écart moyen à la moyenne su panel expert (noté "Delta" sur le graphique), et à 0,5-1 pour l'indice de corrélation. Cet intervalle est défini empiriquement et pourra être amené à évoluer.
